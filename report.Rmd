@@ -1,0 +1,406 @@
+---
+title: 'Comparing Linear Regression, Random Forests and Gradient Boosting Machines:
+  A Toy Example'
+author: "Elio Amicarelli"
+date: "May 2016"
+output: pdf_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## Summary
+
+This report compares the predictive performances of Generalized Linear Models (GLM) with those obtained from Random Forests (RF) and Gradient Boosting Machines (GBM) on the Boston Housing Dataset. In the GLM framework the model for the mean of the response is obtained via automated model selection governed by the second order Akaike Information Criterion (AICc). The variance component is modeled on a Gaussian distribution and the mean-variance relationship specified via an identity link function. Partial residuals are used in order to identify and fix misspecifications in the form of the predictors. The final GLM out-of-sample predictions produce a mean squared error (MSE) of 18.35. RF and GBM are trained and their optimal parameters are selected via 10-fold cross-validation repeated 10 times. RF and GBM out-of-sample predictions produce a MSE of 8.11 and 7.19 respectively.
+
+## 1 Libraries
+```{r message=FALSE}
+library(MASS)
+library(car)
+library(caret)
+library(MuMIn)
+library(randomForest)
+library(xgboost)
+```
+
+## 2 Data
+The Boston Housing Dataset contains 506 observations collected by the U.S Census Service concerning housing in the area of Boston Mass. This dataset is often used in toy applications in order to benchmark algorithms. It contains the following variables:
+
+- CRIM - per capita crime rate by town
+- ZN - proportion of residential land zoned for lots over 25,000 sq.ft.
+- INDUS - proportion of non-retail business acres per town.
+- CHAS - Charles River dummy variable (1 if tract bounds river; 0 otherwise)
+- NOX - nitric oxides concentration (parts per 10 million)
+- RM - average number of rooms per dwelling
+- AGE - proportion of owner-occupied units built prior to 1940
+- DIS - weighted distances to five Boston employment centres
+- RAD - index of accessibility to radial highways
+- TAX - full-value property-tax rate per $10,000
+- PTRATIO - pupil-teacher ratio by town
+- BLACK - 1000(Bk - 0.63)^2 where Bk is the proportion of blacks by town
+- LSTAT - % lower status of the population
+- MEDV - Median value of owner-occupied homes in $1000's
+
+From a quick description of the variables, it is possible to see that there are no missing values and that the minimum and maximum measurements assume plausible values.  
+
+```{r}
+data<-data.frame(Boston)
+data$chas<-as.factor(data$chas)
+summary(data)
+```
+
+Given the nature and distribution of the response variable, in the next section I will start with a Gaussian specification for the GLM error component.
+\
+\
+```{r echo=FALSE}
+hist(data$medv,main="Response",xlab="medv", breaks=20,col="black",probability=T)
+lines(density(data$medv),col="violet")
+```
+
+Before proceeding with the model fitting phase, I operate an 80/20 train/test split on the data.
+
+```{r}
+set.seed(1)
+j.train<-sample(1:nrow(data), nrow(data)*0.8)
+data.train<-data[j.train,]
+data.test<-data[setdiff(1:nrow(data),j.train),]
+```
+
+## 3 Modelling
+
+### 3.1 Generalized Linear Model
+
+_Model Selection and Model Fitting_
+
+I start by fitting a naive GLM to the train data. The model for the mean is specified using all the available predictors in their linear form and the error component relies on a gaussian-identity specification.
+
+```{r}
+glm.naive<-glm(medv ~ ., data=data.train,family=gaussian(link = "identity"))
+```
+
+The summary below shows the Variance Inflation Factors (VIFs) for the predictors.
+
+```{r echo = FALSE}
+vif(glm.naive)
+```
+
+As can be seen, the VIFs for tax and rad are quite high. The summary below shows that after removing the variable with the highest VIF (tax) from the fitting the levels of collinearity among variables drop to less concerning values. This should improve the stability during the model selection and estimation phases. 
+
+```{r}
+glm.naive<-glm(medv ~ .-tax, data=data.train,family=gaussian(link = "identity"))
+```
+```{r echo=FALSE}
+vif(glm.naive) #  way better, this is going to be more stable during model selection
+```
+
+Since I neither have substantive knowledge on the Housing market nor I am interested in testing particular hypotheses on the model coefficients, I proceed with an automated model selection governed by a second order Akaike Information Criterion (AICc). As showed in the summary below, given the set of predictors available and their specification the best performing model includes all of them except for _age_ and _indus_. 
+
+```{r echo=FALSE}
+options(na.action="na.fail")
+drAICc <-dredge(glm.naive, rank="AICc")
+head(drAICc)
+```
+
+The new GLM specification is:
+
+```{r}
+model.glm<-glm(medv ~ .-tax -age -indus,data=data.train,family=gaussian(link="identity"))
+```
+
+An investigation of the partial residuals from the figure below reveals that for the variables _rm_, _lstat_ and _crim_ a different specification would be more appropriate. 
+
+```{r echo=FALSE}
+par(mfrow=c(2,2))
+termplot(model.glm, partial.resid=TRUE, pch=19,col.res = rgb(0,0,0,0.1),
+         col.term="blue", smooth=panel.smooth, col.smth = "red",lty.smth=1,
+         se=T,col.se = "blue")
+```
+
+In order to ameliorate the specification for _rm_ and _lstat_, the following transformations are applied:
+
+```{r}
+data.train$rm2<-(1+1)/(max(data.train$rm)-min(data.train$rm))*
+  (data.train$rm-max(data.train$rm))+1
+data.train$rm2<-data.train$rm2^2
+data.train$lstat2<-log(data.train$lstat)
+data.train$crim2<-log(data.train$crim)
+```
+
+Interactions between predictors could be valuable but given my lack of knowledge about the housing market I prefer not to model this aspect. The final model is:
+
+```{r}
+workingmodel.glm<-glm(medv ~ zn + chas + nox + dis + rad + ptratio + black + lstat2 + 
+                        rm2 + crim2,data=data.train,family=gaussian(link = "identity"))
+```
+
+An AIC-based comparison between the model with all linear terms and the model with transformed predictors confirms the superiority of the latter.
+
+```{r}
+AIC(workingmodel.glm, model.glm )
+```
+
+The model with transformed predictors is thus adopted as final glm model.
+
+```{r}
+finalmodel.glm<-workingmodel.glm
+```
+
+
+_Model Checking_
+
+The left and right panels in the figure below show the final GLM predicted values against the response values and the residuals against the response respectively. As can be seen, the model is slightly overpredicting the response at its lower values and is underpredicting it only at its maximum value (medv = 50). Considering the fitting behavior across the entire range of the response, the latter aspect seems quite strange and may point to a possible censoring of the _medv_ variable in the original dataset.
+
+```{r}
+par(mfrow=c(1,2))
+
+plot(data.train$medv,finalmodel.glm$fitted.values, main="GLM - Train Set", 
+     ylab="Predicted",xlab="Observed", pch=19, col=rgb(0,0,0,0.1))
+abline(0,1, col="violet")
+
+plot(data.train$medv,finalmodel.glm$residuals, main="GLM - Train Set", ylab="Residuals",
+     xlab="Response", pch=19, col=rgb(0,0,0,0.1))
+abline(h=0, col="violet")
+lines(lowess(data.train$medv,finalmodel.glm$residuals), col="blue")
+```
+
+The following graphs show the partial residuals from the final GLM model. No serious problems regarding the specification form of the predictors can be detected.
+
+```{r}
+par(mfrow=c(2,2))
+termplot(finalmodel.glm, partial.resid=TRUE, pch=19,col.res = rgb(0,0,0,0.1),col.term="blue", 
+         smooth=panel.smooth, col.smth = "red",lty.smth=1,se=T,col.se = "blue")
+```
+
+The figure below shows that the regression residuals are approximately normally distributed.
+
+```{r}
+par(mfrow=c(1,2))
+hist(finalmodel.glm$residuals, main="GLM -Train Set",xlab="Residuals", 
+     breaks=20,col="black",probability=T)
+lines(density(finalmodel.glm$residuals),col="violet")
+
+qqnorm(finalmodel.glm$residuals, main="GLM - Train Set", pch=19, col=rgb(0,0,0,0.1))
+qqline(finalmodel.glm$residuals,col="violet")
+```
+
+Overall the GLM seems to fit the data well. In the next section I evaluate the GLM out-of-sample predictive performance. 
+\
+\
+
+_Model Predictive Performances_
+
+Here I apply the same variables transformations used in the train set to the test set. 
+
+```{r}
+data.test$rm2<-(1+1)/(max(data.test$rm)-min(data.test$rm))*
+  (data.test$rm-max(data.test$rm))+1
+data.test$rm2<-data.test$rm2^2
+data.test$lstat2<-log(data.test$lstat)
+data.test$crim2<-log(data.test$crim)
+```
+
+Now I move to the evaluation of the GLM on the test data. 
+
+Obtaining predictions:
+
+```{r}
+glm.preds<-predict(finalmodel.glm, data.test)
+```
+
+A visual comparison of out-of-sample predictions with the observed values:
+
+```{r fig.width=10, fig.height=5}
+plot(data.test$medv, main="GLM - Test Set", ylab="medv",type="l", col= "skyblue")
+lines(glm.preds,col="violet")
+legend(0, 50, c("Observed","Predicted"), lty=c(1,1), col=c("skyblue","violet"))
+```
+
+The mean squared error is finally calculated and will be used as metric to compare the GLM performances with those of Random Forests and Gradient Boosting Machines: 
+
+```{r}
+GLM.MSE<-mean((data.test$medv-glm.preds)^2)
+cat("GLM out of sample MSE:",GLM.MSE)
+```
+
+### 3.2 Random Forest
+
+_Model Training_
+
+First I remove the variables created for the GLM from the data and recode some variables according to algorithms needs.
+
+```{r}
+data.train<-data.train[,!names(data.train)%in%c("lstat2","rm2","crim2")]
+data.test<-data.test[,!names(data.test)%in%c("lstat2","rm2","crim2")]
+
+data.train$chas<-as.numeric(data.train$chas)
+data.train$rad<-as.numeric(data.train$rad)
+data.test$chas<-as.numeric(data.test$chas)
+data.test$rad<-as.numeric(data.test$rad)
+```
+
+It's time to set the parameters for the grid search and the validation procedure.
+
+```{r}
+rf.ctrl <-trainControl(method="repeatedcv",
+                       number=10,
+                       repeats=10,
+                       verboseIter=TRUE,
+                       savePredictions = TRUE)
+
+rf.myGrid<-expand.grid(mtry=seq(1,13,by=1))
+```
+
+Now I train the model:
+
+```{r results="hide"}
+set.seed(1)
+rf.modelspace = train(medv ~ ., data = data.train, 
+                      method = "rf",        
+                      trControl = rf.ctrl, 
+                      tuneGrid = rf.myGrid,
+                      ntree=500,
+                      metric="RMSE")
+
+finalmodel.rf<-rf.modelspace$finalModel
+```
+
+The figure below shows that the RMSE evaluated via 10-fold cross-validation is minimized when the _mtry_ parameter (number of predictors sampled for each tree) is equal to 5. From the graph it is also clear how overfitting startsafter _mtry_ = 7. The final model is a RF with 500 trees and 5 predictors sampled for each tree. 
+
+```{r fig.width=10, fig.height=5, fig.align="center", echo=FALSE }
+plot(rf.modelspace$results$mtry,rf.modelspace$results$RMSE, main="RF - Train Set",ylab="RMSE (Repeated Cross-Validation)", xlab="mtry", col="violet")
+lines(rf.modelspace$results$mtry,rf.modelspace$results$RMSE, col="violet")
+abline(v=rf.modelspace$results$mtry[rf.modelspace$results$RMSE==min(rf.modelspace$results$RMSE)], lty=2, col="darkgrey")
+```
+
+_Model Checking_
+
+As can be seen from the next two figures, the RF residuals' behavior is similar to those observed in the case of GLM. Underprediction of some maximum _medv_ values is still an issue. 
+
+```{r}
+par(mfrow=c(1,2))
+
+plot(data.train$medv,finalmodel.rf$predicted, main="RF - Train Set", 
+     ylab="Predicted",xlab="Observed", pch=19, col=rgb(0,0,0,0.1))
+abline(0,1, col="violet")
+
+plot(data.train$medv,data.train$medv-finalmodel.rf$predicted, main=" RF - Train Set", 
+     ylab="Residuals",xlab="Response", pch=19, col=rgb(0,0,0,0.1))
+abline(h=0, col="violet")
+lines(lowess(data.train$medv,data.train$medv-finalmodel.rf$predicted),col="blue")
+```
+
+
+```{r}
+par(mfrow=c(1,2))
+
+hist(data.train$medv-finalmodel.rf$predicted,main="RF -Train Set",xlab="Residuals",
+     breaks=20,col="black",probability=T)
+lines(density(data.train$medv-finalmodel.rf$predicted),col="violet")
+
+qqnorm(data.train$medv-finalmodel.rf$predicted, main="RF - Train Set",
+       pch=19, col=rgb(0,0,0,0.1))
+qqline(data.train$medv-finalmodel.rf$predicted,col="violet")
+```
+\
+\
+_Model Predictive Performances_
+
+Now I move to a quick examination or RF out-of-sample predictive performances. First, I generate the prediction for the test-set observations.
+
+```{r}
+rf.preds<-predict(finalmodel.rf, data.test)
+```
+
+From a a visual comparison of the out-of-sample predictions, it seems that the RF is modelling the underlying signal more closely then the GLM:
+
+```{r fig.width=10, fig.height=5}
+plot(data.test$medv, main="GLM, RF - Test Set", ylab="medv",type="l", col= "skyblue")
+lines(glm.preds,col="violet")
+lines(rf.preds,col="green")
+legend(0, 50, c("Observed","Predicted GLM", "Predicted RF"), lty=c(1,1,1), 
+       col=c("skyblue","violet", "green"))
+```
+
+To summarize the RF out-of-sample performance, the mean squared error is finally calculated: 
+
+```{r}
+RF.MSE<-mean((data.test$medv-rf.preds)^2)
+cat("GLM out of sample MSE: ",GLM.MSE,"\n",
+    "RF out of sample MSE: ",RF.MSE, sep="")
+```
+
+### 3.2 Gradient Boosting Machine
+
+_Model Training_
+
+The following chunk of code sets the parameters for the grid search and the validation procedure for the GBM. Again, I use 10-fold cross-validation repeated 10 times in order to select the relevant model's parameters.
+
+```{r}
+gbm.ctrl<- trainControl(
+  method = "repeatedcv",
+  number= 10,
+  repeats = 10,
+  verboseIter = TRUE,
+  returnData = FALSE,
+  returnResamp = "all",
+  allowParallel = TRUE
+)
+
+gbm.myGrid<-expand.grid(
+  nrounds = seq(1000, 10000, 100),
+  eta = c(0.01, 0.001),
+  max_depth = seq(1:6),
+  gamma = 1,
+  colsample_bytree=1,
+  min_child_weight = 1
+)
+```
+
+Train the GBM algorithm:
+
+```{r results="hide"}
+set.seed(1)
+gbm.modelspace = train(medv ~ ., data = data.train, 
+                      method = "xgbTree",        
+                      trControl = gbm.ctrl, 
+                      tuneGrid = gbm.myGrid,
+                      metric="RMSE")
+```
+
+The final model has a shrinkage parameter of 0.01 and ensembles 3200 sequentially grown third-order regression trees.
+
+```{r echo=FALSE}
+plot(gbm.modelspace)
+```
+\
+\
+_Model predictive performances_
+
+```{r}
+gbm.preds<-predict(gbm.modelspace, data.test)
+```
+
+A visual comparison:
+
+```{r fig.width=10, fig.height=5}
+plot(data.test$medv, main="GLM, RF, GBM - Test Set",ylab="medv",type="l", col= "skyblue")
+lines(glm.preds,col="violet")
+lines(rf.preds,col="green")
+lines(gbm.preds,col="orange")
+legend(0, 50, c("Observed","Predicted GLM", "Predicted RF", "Predicted GBM"), 
+       lty=c(1,1,1), col=c("skyblue","violet", "green", "orange"))
+```
+
+The mean squared error is finally used as metric for the performance assessment: 
+
+```{r}
+GBM.MSE<-mean((data.test$medv-gbm.preds)^2)
+cat("GLM out of sample MSE: ",GLM.MSE,"\n",
+    "RF out of sample MSE: ",RF.MSE,"\n",
+    "GBM out of sample MSE: ",GBM.MSE, sep = "")
+```
+
+## Conclusion
+
+In this report I modelled the Boston Housing Data and compared the predictive performances of Generalized Linear Models (GLM), Random Forests (RF), Gradient Boosting Machines (GBM). The analysis of residuals shows that the data have been succesfully modelled under the GLM framework. However, because of my lack of substantive knowledge on the housing market, I did not model potentially important aspects of the underlying process (e.g. important interactions among predictors). Even though I only had 13 predictors, the aforementioned limitation is often coupled with another important aspect: high data-complexity (especially large p) makes predictive modelling under the GLM  framework a difficult task. I estimated the discrepancy between the response values in the test set and the out-of-sample predictions using the MSE. The GLM out-of-sample predictions corresponded to a MSE of ~18.35. After GLM I moved to the application of RF and GBM, two of the most used algorithms in the Machine Learning predictive community. During RF and GBM training I tamed the tradeoff between model complexity and the risk of overfitting the data using 10-fold cross-validation (repeated 10 times). Subsequently I produced out-of-sample predictions on the same test set previously used to assess the GLM predictive performance. RF and GBM produced a test MSE of ~8.11 and ~7.19 thus establishing the following order among competing models: _GBM > RF > GLM_.
