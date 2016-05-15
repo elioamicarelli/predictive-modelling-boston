@@ -368,7 +368,7 @@ gbm.modelspace = train(medv ~ ., data = data.train,
                       metric="RMSE")
 ```
 
-The final model has a shrinkage parameter of 0.01 and ensembles 3200 sequentially grown third-order regression trees.
+The final model has a learning rate of 0.01 and ensembles 3200 sequentially grown third-order regression trees.
 
 ```{r echo=FALSE}
 plot(gbm.modelspace)
