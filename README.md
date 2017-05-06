@@ -6,4 +6,5 @@ This project is a quick predictive modelling exercise. Generalized Linear Models
 The repo contains the following items:
 - This readme file (README.md)
 - An analysis report in pdf format (report.pdf)
-- A markdown file for the full replication of the analysis (report.Rmd)
+- A markdown file to reproduce the analysis (report.Rmd)
+- Plain R code to reproduce the analysis
